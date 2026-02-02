@@ -1,0 +1,30 @@
+{
+  "name": "check-in-kiosk",
+  "version": "1.0.0",
+  "description": "Self-service check-in kiosk with Firebase verification",
+  "main": "index.html",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "vite",
+    "deploy": "firebase deploy --only hosting"
+  },
+  "keywords": [
+    "kiosk",
+    "check-in",
+    "firebase",
+    "verification"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "firebase": "^10.7.1",
+    "quasar": "^2.15.4",
+    "vue": "^3.4.21"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "vite": "^5.1.4"
+  }
+}
