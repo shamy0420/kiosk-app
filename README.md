@@ -15,13 +15,16 @@ This is a Quasar (Vue 3) kiosk application that connects to your Firebase backen
 ## File Structure
 ```
 kiosk-app/
-├── index.html          # Vite entry HTML
+├── index.html              # Vite entry HTML
+├── .env.example            # Example env (copy to .env, add VITE_EMAILJS_PUBLIC_KEY)
 ├── src/
-│   ├── App.vue         # Quasar/Vue app
-│   ├── main.js         # App bootstrap
-│   └── styles.css      # Styling
-├── firebase-config.js  # Firebase configuration
-└── README.md           # This file
+│   ├── App.vue             # Kiosk UI and verification + room passcode email
+│   ├── main.js             # App bootstrap
+│   ├── styles.css          # Styling
+│   └── services/
+│       └── emailService.js # EmailJS room passcode email
+├── firebase-config.js      # Firebase configuration
+└── README.md               # This file
 ```
 
 ## Quick Start
@@ -93,41 +96,79 @@ const firebaseConfig = {
 };
 ```
 
-### Firestore Security Rules
-Make sure your Firestore rules allow reading and updating bookings:
+### EmailJS (room passcode email)
+The kiosk sends the room passcode (PIN) to the guest’s email after verification. Configure EmailJS:
 
-```javascript
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    // Allow reading bookings for verification
-    match /Bookings/{booking} {
-      allow read: if true;
-      allow update: if true; // Or add more specific rules
-    }
-    match /bookings/{booking} {
-      allow read: if true;
-      allow update: if true;
-    }
-  }
-}
+1. Copy `.env.example` to `.env`.
+2. Get your **Public Key** from [EmailJS Dashboard](https://dashboard.emailjs.com/admin) and set:
+   ```bash
+   VITE_EMAILJS_PUBLIC_KEY=your_public_key
+   ```
+3. Optional: set `VITE_EMAILJS_SERVICE_ID` and `VITE_EMAILJS_TEMPLATE_ID` if you use different IDs. Defaults: `service_8gcm5jp`, `template_ewopm33`. Your EmailJS template should use variables: `to_name`, `to_email`, `room_passcode`, `room_type`, `check_in`, `check_out`, and optionally `subject`.
+
+Without `VITE_EMAILJS_PUBLIC_KEY`, the kiosk still verifies the code but will not send the room passcode email (and will log a configuration error).
+
+### Firestore Security Rules
+This repo includes **`firestore.rules`** so the kiosk can read and update bookings. Deploy them with:
+
+```bash
+# From the kiosk-app directory; use your Firebase project
+firebase use clixsys-smart-mirror   # or your project ID
+firebase deploy --only firestore
 ```
+
+The rules allow:
+- **Bookings** and **bookings**: `read`, `create`, `update` (no `delete`).  
+  The kiosk needs **read** (to find by `verificationCode`) and **update** (to set `verified`, `verifiedAt`, `roomPasscode`, `roomPasscodeEmailSent`, `roomPasscodeSentAt`).  
+  Your main booking app needs **create** (and read/update) on the same collections.
+
+To tighten later (e.g. only allow updates from your app’s domain or with App Check), edit `firestore.rules` and redeploy.
 
 ## How It Works
 
 1. **User enters code:** The user types their 6-digit verification code
 2. **Code validation:** The app checks if the code is 6 digits
-3. **Firebase query:** Searches for the code in the Bookings collection
+3. **Firebase query:** Searches for the code in **Bookings**, then **bookings** if not found.
 4. **Verification:**
-   - If found and not used: Updates the booking as verified and shows success
+   - If found and not used: Updates the booking with `verified: true` and `verifiedAt` (timestamp), then shows success
    - If already used: Shows error message
    - If not found: Shows invalid code error
-5. **Auto-reset:** After 10 seconds (success) or 5 seconds (error), the kiosk resets
+5. **Room PIN email:** Right after verification, the kiosk sends one email to the guest’s `email` with the room passcode and stay details (via EmailJS). It sets `roomPasscodeEmailSent: true` and `roomPasscodeSentAt` on the booking so the email is not sent twice. If the booking has no `roomPasscode`, the kiosk generates a 6-digit one and saves it first.
+6. **Auto-reset:** After 10 seconds (success) or 5 seconds (error), the kiosk resets
+
+---
+
+## Kiosk verification → Room PIN email
+
+This kiosk **sends the room passcode email itself** (using EmailJS). It does not rely on another app or a Cloud Function.
+
+### What this kiosk does
+
+- Finds the booking in Firestore **Bookings** (or **bookings**) by `verificationCode`
+- Updates that document with `verified: true` and `verifiedAt`
+- If the booking has no `roomPasscode`, generates a 6-digit one and saves it
+- If the guest has an `email` and `roomPasscodeEmailSent` is not yet true: sends one email with room passcode and stay details (subject: “Your Room Passcode: {code}”), then sets `roomPasscodeEmailSent: true` and `roomPasscodeSentAt`
+- On email failure: logs the error and can set `roomPasscodeEmailError` on the booking; verification is not undone
+
+### Avoiding duplicate emails
+
+If your self-check-in app also has a Cloud Function that sends the room passcode on verification, either:
+
+- **Recommended:** Disable or remove that function in the self-check-in project (e.g. `sendRoomPasscodeOnVerification`), or  
+- Leave it deployed: it will only send when `roomPasscodeEmailSent` is not true. Because this kiosk sets `roomPasscodeEmailSent: true` after sending, the function will skip sending.
+
+### Summary
+
+| Step | Who | Action |
+|------|-----|--------|
+| 1 | Guest | Books on web → gets verification code by email. |
+| 2 | Guest | Goes to kiosk and enters verification code. |
+| 3 | **This kiosk** | Finds booking, sets `verified: true` and `verifiedAt`, then sends room passcode email and sets `roomPasscodeEmailSent` / `roomPasscodeSentAt`. |
 
 ## Customization
 
 ### Change Auto-Reset Timer
-In `app.js`, modify the setTimeout values:
+In `src/App.vue`, modify the setTimeout values in `showSuccess` and `showError`:
 ```javascript
 // Success auto-reset (currently 10 seconds)
 setTimeout(() => {
@@ -197,6 +238,15 @@ Add to `index.html` head:
 1. Clear browser cache
 2. Try a different browser
 3. Check responsive design on different screen sizes
+
+### EmailJS 422 (room passcode email fails):
+A 422 from EmailJS usually means the template expects different variable names. In the [EmailJS template](https://dashboard.emailjs.com) for **template_ewopm33** (service **service_8gcm5jp**), ensure:
+- **To** field uses `{{to_email}}`
+- Template body can use: `{{to_name}}`, `{{room_passcode}}`, `{{room_type}}`, `{{check_in}}`, `{{check_out}}`, `{{subject}}`
+- Variable names must match exactly (lowercase with underscores). Check the console for the full error message (`err.text`).
+
+### Firestore "Missing or insufficient permissions":
+If the kiosk can verify but cannot update the booking (e.g. to set `roomPasscodeEmailSent`), update your Firestore rules to allow **update** on the Bookings (and bookings) documents. The kiosk only needs to write `verified`, `verifiedAt`, `roomPasscode` (if missing), `roomPasscodeEmailSent`, and `roomPasscodeSentAt`.
 
 ## Integration with Main App
 

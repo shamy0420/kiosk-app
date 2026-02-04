@@ -48,6 +48,7 @@
         </div>
         <h2>Success!</h2>
         <p id="successMessage">{{ successMessage }}</p>
+        <p class="email-notice">Check your email for your room passcode.</p>
         <div id="bookingDetails" class="booking-details">
           <div class="detail-row">
             <span class="label">Guest Name:</span>
@@ -99,6 +100,7 @@ import { ref, computed, watch, onMounted, nextTick } from 'vue';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs, doc, updateDoc } from 'firebase/firestore';
 import firebaseConfig from '../firebase-config.js';
+import { sendRoomPasscodeEmail } from './services/emailService.js';
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
@@ -113,6 +115,73 @@ const booking = ref(null);
 const codeInputRef = ref(null);
 
 const showInput = computed(() => !isLoading.value && !isSuccess.value && !isError.value);
+
+/** Generate a 6-digit room passcode if the booking does not have one. */
+function generateRoomPasscode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+/**
+ * After verification: ensure roomPasscode exists, send room passcode email, then update Firestore.
+ * Firestore updates are best-effort (permission errors are logged only); verification is never undone.
+ */
+async function sendRoomPasscodeEmailAfterVerify(bookingData, collectionName) {
+  const bookingRef = doc(db, collectionName, bookingData.id);
+  let roomPasscode = bookingData.roomPasscode;
+
+  if (!roomPasscode) {
+    roomPasscode = generateRoomPasscode();
+    try {
+      await updateDoc(bookingRef, { roomPasscode });
+    } catch (err) {
+      if (err?.code === 'permission-denied') {
+        console.warn('Firestore: cannot write roomPasscode (check rules). Email will still use generated code.');
+      } else {
+        console.error('Firestore update roomPasscode failed:', err);
+      }
+    }
+  }
+
+  const guestEmail = (bookingData.email || bookingData.guestEmail || bookingData.userEmail || '').toString().trim();
+  const alreadySent = bookingData.roomPasscodeEmailSent === true;
+  if (alreadySent || !guestEmail) {
+    if (!guestEmail) console.warn('Room passcode email skipped: no guest email on booking');
+    return;
+  }
+
+  let result;
+  try {
+    result = await sendRoomPasscodeEmail({
+      to_name: bookingData.guestName || bookingData.guest_name || 'Guest',
+      to_email: guestEmail,
+      email: guestEmail,
+      room_passcode: roomPasscode,
+      room_type: bookingData.roomTypeName || bookingData.roomName || 'N/A',
+      check_in: bookingData.checkIn,
+      check_out: bookingData.checkOut
+    });
+  } catch (err) {
+    console.error('Room passcode email error:', err?.text || err?.message || err);
+    return;
+  }
+
+  if (result.success) {
+    try {
+      await updateDoc(bookingRef, {
+        roomPasscodeEmailSent: true,
+        roomPasscodeSentAt: new Date().toISOString()
+      });
+    } catch (err) {
+      if (err?.code === 'permission-denied') {
+        console.warn('Firestore: cannot write roomPasscodeEmailSent (check rules).');
+      } else {
+        console.error('Firestore update roomPasscodeEmailSent failed:', err);
+      }
+    }
+  } else {
+    console.error('Room passcode email failed:', result.error);
+  }
+}
 
 function handleKeypadClick(key) {
   const currentValue = code.value;
@@ -143,7 +212,6 @@ async function verifyCode() {
   try {
     let q = query(collection(db, 'Bookings'), where('verificationCode', '==', trimmedCode));
     let querySnapshot = await getDocs(q);
-
     if (querySnapshot.empty) {
       q = query(collection(db, 'bookings'), where('verificationCode', '==', trimmedCode));
       querySnapshot = await getDocs(q);
@@ -151,6 +219,7 @@ async function verifyCode() {
 
     if (!querySnapshot.empty) {
       const bookingDoc = querySnapshot.docs[0];
+      const collectionName = bookingDoc.ref.parent.id;
       const data = {
         id: bookingDoc.id,
         ...bookingDoc.data()
@@ -161,14 +230,14 @@ async function verifyCode() {
         return;
       }
 
-      const collectionName = bookingDoc.ref.parent.id;
-
       await updateDoc(doc(db, collectionName, data.id), {
         verified: true,
         verifiedAt: new Date().toISOString()
       });
 
       showSuccess(data);
+      // Kiosk sends the room PIN email; do not block UI
+      sendRoomPasscodeEmailAfterVerify(data, collectionName);
     } else {
       showError('Invalid code. Please check and try again.');
     }
@@ -189,7 +258,7 @@ function showSuccess(bookingData) {
   isSuccess.value = true;
   isError.value = false;
   booking.value = bookingData;
-  successMessage.value = `Welcome, ${bookingData.guestName || 'Guest'}!`;
+  successMessage.value = `Welcome, ${bookingData.guestName || 'Guest'}! Check your email for your room passcode.`;
 
   setTimeout(() => {
     resetKiosk();
