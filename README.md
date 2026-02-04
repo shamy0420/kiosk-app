@@ -108,6 +108,13 @@ The kiosk sends the room passcode (PIN) to the guest’s email after verificatio
 
 Without `VITE_EMAILJS_PUBLIC_KEY`, the kiosk still verifies the code but will not send the room passcode email (and will log a configuration error).
 
+**Netlify:** Vite only sees env vars at **build time** and only variables that start with **`VITE_`**. In Netlify:
+
+1. Go to **Site configuration** → **Environment variables**.
+2. Add a variable with the **exact** key: **`VITE_EMAILJS_PUBLIC_KEY`** (not `EMAILJS_PUBLIC_KEY`).
+3. Set the value to your EmailJS public key.
+4. **Trigger a new deploy** (e.g. “Deploy site” or push a commit). The key is baked in when `npm run build` runs; changing the variable alone does not update an already-built site.
+
 ### Firestore Security Rules
 This repo includes **`firestore.rules`** so the kiosk can read and update bookings. Deploy them with:
 
